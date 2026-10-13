@@ -2,14 +2,16 @@
 /**
  * verify-proof.mjs — check, from nothing but the public API and a Solana RPC, that a HIM round was provable (docs/PROOF_SEAL.md).
  *
- *   node scripts/verify-proof.mjs <roundId>                       one round: its result leaf and each question leaf
- *   node scripts/verify-proof.mjs --epoch <n>                     one epoch: recompute both roots from the published leaves
- *   node scripts/verify-proof.mjs --keyrace <season> --wallet <W> [--inputs keyrace-s0-in.json]
+ *   node verify-proof.mjs <roundId>                       one round: its result leaf, each question leaf and, when players took
+ *                                                                 the Human Round (the Human Round), each human-check leaf
+ *   node verify-proof.mjs --epoch <n>                     one epoch: recompute both roots from the published leaves
+ *   node verify-proof.mjs --keyrace <season> --wallet <W> [--inputs keyrace-s0-in.json]
  *                                                                 the Key Race seals and a wallet's own leaves
  *   options: --api <url>   the escrow API (default $HIM_ESCROW_API_URL or https://api.him.finance/escrow)
  *            --rpc <url>   the Solana RPC (default: the public endpoint of the cluster the API reports)
  *            --open <keypair.json>   a player's wallet key: signs HIM:PROOF_OPEN so the API hands over the answer keys + salts of
  *                                    THAT round (the player was shown them anyway); only then can the question leaves be recomputed
+ *            --human-trace <file.json>   a player's saved Human Round trace ([{t,x,y,k}]): its hash must equal the sealed "th" of one human-check leaf
  *            --json     machine-readable result
  *
  * What it proves (and does not): see the threat model in docs/PROOF_SEAL.md. In short: the answer key of every sealed question and the
@@ -36,6 +38,7 @@ export const leafNode = (preimage) => sha(Buffer.from([0]), Buffer.from(preimage
 export const parent = (l, r) => sha(Buffer.from([1]), l, r);
 export const qLeaf = (opening) => leafNode('HIM1|ql|' + opening).toString('hex');
 export const rLeaf = (record) => leafNode('HIM1|rl|' + record).toString('hex');
+export const hlLeaf = (record) => leafNode('HIM1|hl|' + record).toString('hex');
 export const krLeaf = (label, body) => leafNode(label + body).toString('hex');
 
 /** The path from a leaf up: [{right, h}], right = the sibling sits on the right of the running hash. */
@@ -62,6 +65,16 @@ export function rootOf(nodes) {
   }
   return level[0].toString('hex');
 }
+
+/**
+ * The canonical form of a Human Round trace (human_round_score.go humanCanonical): "t,x,y,k" per event, t in tenths of a ms, x and y in hundredths of a
+ * field unit, all rounded half up, joined by ";". Its sha256 is the sealed "th".
+ */
+export function humanCanonical(events) {
+  const kind = { d: 'd', down: 'd', m: 'm', move: 'm', u: 'u', up: 'u' };
+  return events.map((e) => `${Math.floor(e.t * 10 + 0.5)},${Math.floor(e.x * 100 + 0.5)},${Math.floor(e.y * 100 + 0.5)},${kind[e.k ?? e.kind]}`).join(';');
+}
+export const humanTraceHash = (events) => sha(Buffer.from(humanCanonical(events), 'utf8')).toString('hex');
 
 // ── Solana ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -135,7 +148,7 @@ export function signedOpen(keypairFile, roundId, now = Date.now()) {
  * Verify a PROOF_ROUND response. Pure Merkle / structure checks run always; the chain checks run when `rpc` is given.
  * Returns {checks:[{name, ok, detail}], status:'pass'|'fail'|'pending'|'partial'}.
  */
-export async function verifyRound(resp, { rpc, openings = [], fetchFn = fetch } = {}) {
+export async function verifyRound(resp, { rpc, openings = [], humanTrace = null, fetchFn = fetch } = {}) {
   const checks = [];
   const add = (name, ok, detail = '') => checks.push({ name, ok, detail });
   const res = resp.result;
@@ -185,6 +198,36 @@ export async function verifyRound(resp, { rpc, openings = [], fetchFn = fetch } 
       }
     }
   }
+  // the Human Round (the Human Round): one leaf per player who took the check, in the SAME result tree and sealed by the same memo kind
+  const humans = resp.human ?? [];
+  const sealedThs = [];
+  for (const h of humans) {
+    let hr = null;
+    try { hr = JSON.parse(h.record); } catch { /* reported below */ }
+    const tag = `human check ${String(h.key ?? '').split('|h|')[1]?.slice(0, 8) ?? '?'}`;
+    add(`${tag}: record parses`, !!hr && hr.v === 1);
+    add(`${tag}: leaf = sha256(0x00 | "HIM1|hl|" | record)`, hlLeaf(h.record) === h.leaf);
+    if (hr) {
+      add(`${tag}: record names this round and its sort key`, hr.r === resp.roundId && h.key === `${hr.r}|h|${hr.pid}`, h.key);
+      sealedThs.push(hr.th);
+    }
+    if (!h.root) {
+      pending = true;
+      add(`${tag}: sealed`, false, `not sealed yet (the epoch closes ${new Date(h.sealsAfterMs).toISOString()})`);
+      continue;
+    }
+    add(`${tag}: Merkle path reaches the epoch root`, verifyPath(h.leaf, h.path, h.root));
+    const text = `HIM1|r|${h.epoch}|${h.root}`;
+    add(`${tag}: memo text is HIM1|r|<epoch>|<root>`, h.memo?.text === text, h.memo?.text);
+    if (rpc) {
+      if (!h.memo?.sig) { pending = true; add(`${tag}: memo on chain`, false, 'seal found, memo not confirmed yet'); } else {
+        const m = await checkMemo({ rpc, sig: h.memo.sig, text, signer: resp.signer, fetchFn });
+        add(`${tag}: memo is on chain, signed by the seal key`, m.ok, m.reason ?? h.memo.sig);
+        if (m.ok && hr && m.blockTime) add(`${tag}: sealed AFTER the check was recorded`, m.blockTime * 1000 >= hr.t - 2000, new Date(m.blockTime * 1000).toISOString());
+      }
+    }
+  }
+  if (humanTrace) add('human trace: hashes to the sealed th of a human-check leaf', sealedThs.includes(humanTraceHash(humanTrace)), humanTraceHash(humanTrace).slice(0, 16));
   const failed = checks.some((c) => !c.ok && !(pending && /sealed|memo/.test(c.name)));
   let status = failed ? 'fail' : pending ? 'pending' : unsealed || late ? 'partial' : 'pass';
   if (status === 'pass' && !rpc) status = 'pass-offchain';
@@ -295,14 +338,15 @@ async function main() {
     process.exit(EXIT[v.status]);
   }
   const roundId = o._[0];
-  if (!roundId) { console.error('usage: node scripts/verify-proof.mjs <roundId> | --epoch <n> | --keyrace <season> --wallet <W>   [--api url] [--rpc url] [--open keypair.json] [--json]'); process.exit(64); }
+  if (!roundId) { console.error('usage: node verify-proof.mjs <roundId> | --epoch <n> | --keyrace <season> --wallet <W>   [--api url] [--rpc url] [--open keypair.json] [--json]'); process.exit(64); }
   const resp = await call(api, { action: 'PROOF_ROUND', roundId });
   let openings = [];
   if (o.open) {
     const r = await call(api, signedOpen(o.open, roundId));
     openings = r.openings ?? [];
   }
-  const v = await verifyRound(resp, { rpc: o.rpc ?? PUBLIC_RPC[resp.cluster], openings });
+  const humanTrace = o['human-trace'] ? JSON.parse(fs.readFileSync(o['human-trace'], 'utf8')) : null;
+  const v = await verifyRound(resp, { rpc: o.rpc ?? PUBLIC_RPC[resp.cluster], openings, humanTrace });
   print(`round ${roundId} (${resp.kind}, ${resp.cluster})`, v, o.json);
   process.exit(EXIT[v.status]);
 }

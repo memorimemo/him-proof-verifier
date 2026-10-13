@@ -19,7 +19,7 @@ node verify-proof.mjs --epoch <n>
 node verify-proof.mjs <roundId> --json
 ```
 
-Options: `--api <url>` (default `https://api.him.finance/escrow`), `--rpc <url>` (default the public Solana mainnet RPC, or `$SOLANA_RPC_URL`).
+Options: `--human-trace <file.json>` (a Human check trace you saved from the site: its hash must equal the sealed `th` of one human-check leaf), `--api <url>` (default `https://api.him.finance/escrow`), `--rpc <url>` (default the public Solana mainnet RPC, or `$SOLANA_RPC_URL`).
 
 Example, a real mainnet round (settled 10 Oct 2026):
 
@@ -35,6 +35,7 @@ Seal signer on Solana mainnet: `2NrV3dn1DPL9dWvQfnndejyyjR4p2b2puAwp8nC7uGpJ`. O
 
 - Question leaf: `sha256(0x00 || "HIM1|ql|" || opening)`; result leaf: `sha256(0x00 || "HIM1|rl|" || record)`; node: `sha256(0x01 || left || right)`.
 - An opening carries the question, its options, the answer index and a random salt, so a root can never be used as an answer lookup.
+- Human check leaf (when a player took the optional Human check after a round): `sha256(0x00 || "HIM1|hl|" || record)`, in the same result tree, so the normal results memo seals it. The record holds a pseudonymous player id, the seed, the sha256 of the trace (`th`), the score and the verdict. It is a signal, not proof, and it never changes a result.
 - Memo text: `HIM1|q|<epoch>|<root>` (questions, before play) and `HIM1|r|<epoch>|<root>` (results, after).
 - The golden vectors in `verify-proof.test.mjs` are the same constants the HIM engine pins; they must agree byte for byte.
 

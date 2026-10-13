@@ -1,9 +1,9 @@
-// Run: node --test scripts/verify-proof.test.mjs
+// Run: node --test verify-proof.test.mjs
 // The verifier must agree byte for byte with the Go engine (proof_merkle.go): the goldens below are the SAME constants proof_merkle_test.go pins.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { leafNode, qLeaf, rLeaf, krLeaf, rootOf, parent, verifyPath, verifyRound, verifyEpoch, verifyKeyRace, checkMemo, signedOpen } from './verify-proof.mjs';
+import { leafNode, qLeaf, rLeaf, hlLeaf, humanCanonical, humanTraceHash, krLeaf, rootOf, parent, verifyPath, verifyRound, verifyEpoch, verifyKeyRace, checkMemo, signedOpen } from './verify-proof.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -243,6 +243,107 @@ test('the answer the Go engine gave on devnet verifies offline, and each tamperi
   ]) {
     const bad = structuredClone(resp);
     mutate(bad);
+    assert.equal((await verifyRound(bad, {})).status, 'fail');
+  }
+});
+
+// ── the Human Round (docs/HUMAN_ROUND.md): hl leaves in the same result tree ──────────────────────────────
+
+const HL_PID = '00112233445566778899aabbccddeeff';
+const HL_TRACE = [{ t: 800, x: 180, y: 180, k: 'd' }, { t: 816.7, x: 180.1, y: 179.9, k: 'm' }, { t: 900, x: 181, y: 179.5, k: 'u' }];
+
+test('hl golden vectors match the Go engine (computed with node crypto, pinned in human_round_test.go too)', () => {
+  assert.equal(humanCanonical(HL_TRACE), '8000,18000,18000,d;8167,18010,17990,m;9000,18100,17950,u');
+  assert.equal(humanTraceHash(HL_TRACE), 'a4d1ca46ae873cea249f0e4598e8dc3007d7396584baa754c61230ea30c27972');
+  const rec = '{"v":1,"r":"round-demo-1","pid":"00112233445566778899aabbccddeeff","seed":"0badf00d","task":"follow-light-1","th":"a4d1ca46ae873cea249f0e4598e8dc3007d7396584baa754c61230ea30c27972","hs":87,"vd":"human-like","t":1760000000123}';
+  assert.equal(hlLeaf(rec), '7bb6f98603bf60bf01295c9bba30eb4659bcce523f5596c1ecc51f169b885676');
+  // a round leaf and a human leaf of the same text never collide (different label)
+  assert.notEqual(hlLeaf(rec), rLeaf(rec));
+});
+
+/** A PROOF_ROUND answer whose result epoch also holds one human-check leaf of the round. */
+function humanFixture({ rEpoch = 12, settled = T0 + 120_000, doneAt = T0 + 200_000, th = humanTraceHash(HL_TRACE) } = {}) {
+  const f = fixture({ rEpoch, settled });
+  const hrec = JSON.stringify({ v: 1, r: 'round-1', pid: HL_PID, seed: '0badf00d', task: 'follow-light-1', th, hs: 91, vd: 'human-like', t: doneAt });
+  const key = `round-1|h|${HL_PID}`;
+  const recs = [['round-0', null], ['round-1', f.resp.result.record], [key, hrec], ['round-2', null]];
+  const nodes = recs.map(([id, r]) => (id === key ? leafNode('HIM1|hl|' + r) : leafNode('HIM1|rl|' + (r ?? JSON.stringify({ v: 1, k: 'duel', r: id, t0: T0, t1: settled, p: [] })))));
+  const root = rootOf(nodes);
+  f.resp.result = { ...f.resp.result, leaf: nodes[1].toString('hex'), root, n: 4, index: 1, path: pathOf(nodes, 1), memo: { text: `HIM1|r|${rEpoch}|${root}`, sig: 'SIGR', confirmed: true } };
+  f.resp.human = [{ key, epoch: rEpoch, record: hrec, leaf: nodes[2].toString('hex'), state: 'confirmed', root, n: 4, index: 2, path: pathOf(nodes, 2), memo: { text: `HIM1|r|${rEpoch}|${root}`, sig: 'SIGR', confirmed: true } }];
+  return { ...f, hrec, nodes, root, key };
+}
+
+const chainFor = (f) => rpcOf({ SIGQ: { memos: [f.resp.questions[0].memo.text], blockTime: T0 / 1000 - 3600 }, SIGR: { memos: [f.resp.result.memo.text], blockTime: T0 / 1000 + 4000 } });
+
+test('a round with a human-check leaf verifies end to end, and --human-trace ties a saved trace to the sealed hash', async () => {
+  const f = humanFixture();
+  const fetchFn = chainFor(f);
+  const v = await verifyRound(f.resp, { rpc: 'http://fake', fetchFn, humanTrace: HL_TRACE });
+  assert.equal(v.status, 'pass', JSON.stringify(v.checks.filter((c) => !c.ok)));
+  assert.ok(v.checks.some((c) => /human check .*Merkle path/.test(c.name) && c.ok));
+  assert.ok(v.checks.some((c) => /human check .*memo is on chain/.test(c.name) && c.ok));
+  assert.ok(v.checks.some((c) => /human trace/.test(c.name) && c.ok));
+  // a different trace does not hash to the sealed th
+  const other = await verifyRound(f.resp, { rpc: 'http://fake', fetchFn, humanTrace: HL_TRACE.slice(0, 2) });
+  assert.equal(other.status, 'fail');
+});
+
+test('human-check leaf: doctored record, wrong path, wrong sort key, a check sealed before it was recorded and a swapped label are each caught', async () => {
+  const f = humanFixture();
+  const fetchFn = chainFor(f);
+  const doctored = structuredClone(f.resp);
+  doctored.human[0].record = doctored.human[0].record.replace('"hs":91', '"hs":99');
+  assert.equal((await verifyRound(doctored, { rpc: 'http://fake', fetchFn })).status, 'fail');
+  const badPath = structuredClone(f.resp);
+  badPath.human[0].path[0].h = '00'.repeat(32);
+  assert.equal((await verifyRound(badPath, { rpc: 'http://fake', fetchFn })).status, 'fail');
+  const badKey = structuredClone(f.resp);
+  badKey.human[0].key = 'round-1|h|' + 'ff'.repeat(16);
+  assert.equal((await verifyRound(badKey, { rpc: 'http://fake', fetchFn })).status, 'fail');
+  // the chain says the memo was written before the check was recorded: not possible for an honest seal
+  const early = humanFixture({ doneAt: T0 + 9_000_000 });
+  assert.equal((await verifyRound(early.resp, { rpc: 'http://fake', fetchFn: chainFor(early) })).status, 'fail');
+  // a round leaf is not accepted in place of a human leaf: the label differs
+  const swapped = structuredClone(f.resp);
+  swapped.human[0].leaf = rLeaf(swapped.human[0].record);
+  assert.equal((await verifyRound(swapped, { rpc: 'http://fake', fetchFn })).status, 'fail');
+});
+
+test('a human-check leaf in an epoch that is not sealed yet makes the round pending, not failed', async () => {
+  const f = humanFixture();
+  delete f.resp.human[0].root; delete f.resp.human[0].path; delete f.resp.human[0].memo; f.resp.human[0].state = 'pending'; f.resp.human[0].sealsAfterMs = Date.now() + 1000;
+  assert.equal((await verifyRound(f.resp, { rpc: 'http://fake', fetchFn: chainFor(f) })).status, 'pending');
+});
+
+test('--epoch still recomputes the root with hl leaves in the tree (the published key is "<round>|h|<pid>")', async () => {
+  const f = humanFixture();
+  const leaves = [['round-0', f.nodes[0]], ['round-1', f.nodes[1]], [f.key, f.nodes[2]], ['round-2', f.nodes[3]]].map(([round, n]) => ({ round, l: n.toString('hex') }));
+  const memoText = `HIM1|r|12|${f.root}`;
+  const fetchFn = async (url, init) => {
+    if (url === 'http://api') return { ok: true, json: async () => ({ success: true, cluster: 'devnet', signer: SIGNER, q: { sealed: false }, r: { sealed: true, root: f.root, n: 4, memo: { text: memoText, sig: 'SIGR' }, leaves } }) };
+    return rpcOf({ SIGR: { memos: [memoText], blockTime: 1 } })(url, init);
+  };
+  const v = await verifyEpoch('http://api', 12, { rpc: 'http://fake', fetchFn });
+  assert.equal(v.status, 'pass', JSON.stringify(v.checks.filter((c) => !c.ok)));
+  leaves[2].l = '00'.repeat(32);
+  assert.equal((await verifyEpoch('http://api', 12, { rpc: 'http://fake', fetchFn })).status, 'fail');
+});
+
+test('the answer the Go engine gave for a round with a human check (local run, fake chain) verifies offline, and each tampering is caught', async () => {
+  const resp = JSON.parse(fs.readFileSync(new URL('./fixtures/proof-round-human-local.json', import.meta.url), 'utf8'));
+  assert.equal(resp.human.length, 1);
+  const v = await verifyRound(resp, {});
+  assert.equal(v.status, 'pass-offchain', JSON.stringify(v.checks.filter((c) => !c.ok)));
+  assert.ok(v.checks.some((c) => /human check .*Merkle path/.test(c.name) && c.ok));
+  for (const tamper of [
+    (r) => { r.human[0].record = r.human[0].record.replace('"hs":100', '"hs":1'); },
+    (r) => { r.human[0].path[0].h = '00'.repeat(32); },
+    (r) => { r.human[0].memo.text = r.human[0].memo.text.replace('|r|500|', '|r|501|'); },
+    (r) => { r.human[0].key = r.human[0].key.replace('|h|', '|h|ff'); },
+  ]) {
+    const bad = structuredClone(resp);
+    tamper(bad);
     assert.equal((await verifyRound(bad, {})).status, 'fail');
   }
 });

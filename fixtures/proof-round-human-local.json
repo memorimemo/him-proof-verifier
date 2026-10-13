@@ -1,0 +1,55 @@
+{
+ "cluster": "devnet",
+ "epochSec": 3600,
+ "format": "HIM1|\u003cq|r\u003e|\u003cepoch\u003e|\u003croot hex\u003e",
+ "graceSec": 60,
+ "human": [
+  {
+   "epoch": 500,
+   "index": 1,
+   "key": "ab00000000000000000000000000000000000000000000000000000000000000|h|74bbeeb0cac905c7c6607672f3df3898",
+   "leaf": "bbfb6243dbc863187a9b83ae7756d9fb38e42b0f1cedbd10078404fed985f0c0",
+   "memo": {
+    "text": "HIM1|r|500|5c13c76f24f4995b6e7edc33c91f45e02be79b47435b87240cf320b7bf489922",
+    "confirmed": false
+   },
+   "n": 2,
+   "path": [
+    {
+     "right": false,
+     "h": "26968bb0843f00514a9ad0f89e470b24d7e0bcbe6fd41ffae8e353a567249ae5"
+    }
+   ],
+   "record": "{\"v\":1,\"r\":\"ab00000000000000000000000000000000000000000000000000000000000000\",\"pid\":\"74bbeeb0cac905c7c6607672f3df3898\",\"seed\":\"0badf00d\",\"task\":\"follow-light-1\",\"th\":\"edfb213d9c88b50c678a5df4b875baf8a1524c7989f6d3ca6ac4dcfce5d02d92\",\"hs\":100,\"vd\":\"human-like\",\"t\":1800060000}",
+   "root": "5c13c76f24f4995b6e7edc33c91f45e02be79b47435b87240cf320b7bf489922",
+   "sealsAfterMs": 1803660000,
+   "state": "sealing"
+  }
+ ],
+ "kind": "duel",
+ "questions": [],
+ "result": {
+  "epoch": 500,
+  "index": 0,
+  "leaf": "26968bb0843f00514a9ad0f89e470b24d7e0bcbe6fd41ffae8e353a567249ae5",
+  "memo": {
+   "text": "HIM1|r|500|5c13c76f24f4995b6e7edc33c91f45e02be79b47435b87240cf320b7bf489922",
+   "confirmed": false
+  },
+  "n": 2,
+  "path": [
+   {
+    "right": true,
+    "h": "bbfb6243dbc863187a9b83ae7756d9fb38e42b0f1cedbd10078404fed985f0c0"
+   }
+  ],
+  "record": "{\"v\":1,\"k\":\"duel\",\"r\":\"ab00000000000000000000000000000000000000000000000000000000000000\",\"t0\":1800001000,\"t1\":1800040000,\"rules\":2,\"p\":[{\"pid\":\"74bbeeb0cac905c7c6607672f3df3898\",\"pl\":1,\"ok\":8,\"pts\":9,\"ns\":0},{\"pid\":\"3c79d86d46ea16d31d8fe4901b64b63e\",\"pl\":2,\"ok\":5,\"pts\":9,\"ns\":0}]}",
+  "root": "5c13c76f24f4995b6e7edc33c91f45e02be79b47435b87240cf320b7bf489922",
+  "sealsAfterMs": 1803660000,
+  "state": "sealing"
+ },
+ "reveal": "participant",
+ "roundId": "ab00000000000000000000000000000000000000000000000000000000000000",
+ "signer": "SignerPubkey11111111111111111111111111111111",
+ "success": true
+}
